@@ -75,7 +75,7 @@ use parse::obsolete::{ObsoleteMoveInit, ObsoleteBinaryMove};
 use parse::obsolete::{ObsoleteStructCtor, ObsoleteWith};
 use parse::obsolete::{ObsoleteSyntax, ObsoleteLowerCaseKindBounds};
 use parse::obsolete::{ObsoleteUnsafeBlock, ObsoleteImplSyntax};
-use parse::obsolete::{ObsoleteTraitBoundSeparator, ObsoleteMutOwnedPointer};
+use parse::obsolete::{ObsoleteTraitBoundSeparator};
 use parse::prec::{as_prec, token_to_binop};
 use parse::token::{can_begin_expr, is_ident, is_ident_or_path};
 use parse::token::{is_plain_ident, INTERPOLATED, special_idents};
@@ -677,11 +677,6 @@ pub impl Parser {
         // rather than boxed ptrs.  But the special casing of str/vec is not
         // reflected in the AST type.
         let mt = self.parse_mt();
-
-        if mt.mutbl == m_mutbl && sigil == OwnedSigil {
-            self.obsolete(*self.last_span, ObsoleteMutOwnedPointer);
-        }
-
         ctor(mt)
     }
 
@@ -753,6 +748,18 @@ pub impl Parser {
         }
     }
 
+    fn parse_capture_item_or(parse_arg_fn: fn(Parser) -> arg_or_capture_item)
+        -> arg_or_capture_item
+    {
+        if self.eat_keyword(~"copy") {
+            // XXX outdated syntax now that moves-based-on-type has gone in
+            self.parse_ident();
+            either::Right(())
+        } else {
+            parse_arg_fn(self)
+        }
+    }
+
     // This version of parse arg doesn't necessarily require
     // identifier names.
     fn parse_arg_general(require_name: bool) -> arg {
@@ -781,26 +788,32 @@ pub impl Parser {
         either::Left(self.parse_arg_general(true))
     }
 
+    fn parse_arg_or_capture_item() -> arg_or_capture_item {
+        self.parse_capture_item_or(|p| p.parse_arg())
+    }
+
     fn parse_fn_block_arg() -> arg_or_capture_item {
-        let m = self.parse_arg_mode();
-        let is_mutbl = self.eat_keyword(~"mut");
-        let pat = self.parse_pat(false);
-        let t = if self.eat(token::COLON) {
-            self.parse_ty(false)
-        } else {
-            @Ty {
-                id: self.get_id(),
-                node: ty_infer,
-                span: mk_sp(self.span.lo, self.span.hi),
-            }
-        };
-        either::Left(ast::arg {
-            mode: m,
-            is_mutbl: is_mutbl,
-            ty: t,
-            pat: pat,
-            id: self.get_id()
-        })
+        do self.parse_capture_item_or |p| {
+            let m = p.parse_arg_mode();
+            let is_mutbl = self.eat_keyword(~"mut");
+            let pat = p.parse_pat(false);
+            let t = if p.eat(token::COLON) {
+                p.parse_ty(false)
+            } else {
+                @Ty {
+                    id: p.get_id(),
+                    node: ty_infer,
+                    span: mk_sp(p.span.lo, p.span.hi),
+                }
+            };
+            either::Left(ast::arg {
+                mode: m,
+                is_mutbl: is_mutbl,
+                ty: t,
+                pat: pat,
+                id: p.get_id()
+            })
+        }
     }
 
     fn maybe_parse_fixed_vstore_with_star() -> Option<uint> {
@@ -1095,15 +1108,10 @@ pub impl Parser {
                 self.mk_expr(lo, hi, expr_tup(es))
             }
         } else if *self.token == token::LBRACE {
-            if self.looking_at_record_literal() {
-                ex = self.parse_record_literal();
-                hi = self.span.hi;
-            } else {
-                self.bump();
-                let blk = self.parse_block_tail(lo, default_blk);
-                return self.mk_expr(blk.span.lo, blk.span.hi,
-                                     expr_block(blk));
-            }
+            self.bump();
+            let blk = self.parse_block_tail(lo, default_blk);
+            return self.mk_expr(blk.span.lo, blk.span.hi,
+                                 expr_block(blk));
         } else if token::is_bar(*self.token) {
             return self.parse_lambda_expr();
         } else if self.eat_keyword(~"if") {
@@ -1221,24 +1229,21 @@ pub impl Parser {
                     self.bump();
                     let mut fields = ~[];
                     let mut base = None;
-                    fields.push(self.parse_field(token::COLON));
                     while *self.token != token::RBRACE {
+                        fields.push(self.parse_field(token::COLON));
+
                         if self.try_parse_obsolete_with() {
                             break;
                         }
 
-                        self.expect(token::COMMA);
-
-                        if self.eat(token::DOTDOT) {
-                            base = Some(self.parse_expr());
+                        if self.eat(token::COMMA) {
+                            if self.eat(token::DOTDOT) {
+                                base = Some(self.parse_expr());
+                                break;
+                            }
+                        } else {
                             break;
                         }
-
-                        if *self.token == token::RBRACE {
-                            // Accept an optional trailing comma.
-                            break;
-                        }
-                        fields.push(self.parse_field(token::COLON));
                     }
 
                     hi = pth.span.hi;
@@ -1709,7 +1714,7 @@ pub impl Parser {
 
         // if we want to allow fn expression argument types to be inferred in
         // the future, just have to change parse_arg to parse_fn_block_arg.
-        let decl = self.parse_fn_decl(|p| p.parse_arg());
+        let decl = self.parse_fn_decl(|p| p.parse_arg_or_capture_item());
 
         let body = self.parse_block();
 
@@ -1885,10 +1890,13 @@ pub impl Parser {
     // For distingishing between record literals and blocks
     fn looking_at_record_literal() -> bool {
         let lookahead = self.look_ahead(1);
+        let next_lookahead = self.look_ahead(2);
         *self.token == token::LBRACE &&
-            (self.token_is_keyword(~"mut", lookahead) ||
-             (is_plain_ident(lookahead) &&
-              self.look_ahead(2) == token::COLON))
+            ((is_plain_ident(lookahead) &&
+              next_lookahead == token::COLON) ||
+             (lookahead == token::RBRACE &&
+              *self.restriction != RESTRICT_NO_BAR_OR_DOUBLEBAR_OP &&
+              !can_begin_expr(next_lookahead)))
     }
 
     fn parse_record_literal() -> expr_ {

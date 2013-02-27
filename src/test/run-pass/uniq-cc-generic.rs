@@ -24,7 +24,7 @@ fn make_uniq_closure<A:Owned + Copy>(a: A) -> fn~() -> uint {
 
 fn empty_pointy() -> @mut Pointy {
     return @mut Pointy {
-        mut a : none,
+        a : none,
         d : make_uniq_closure(~"hi")
     }
 }

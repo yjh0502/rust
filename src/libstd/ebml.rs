@@ -219,7 +219,7 @@ pub mod reader {
     }
 
     pub fn Decoder(d: Doc) -> Decoder {
-        Decoder { mut parent: d, mut pos: d.start }
+        Decoder { parent: d, pos: d.start }
     }
 
     priv impl Decoder {

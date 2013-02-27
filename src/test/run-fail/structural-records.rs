@@ -8,14 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-enum what { }
-
-fn what_to_str(x: what) -> ~str
-{
-    match (x) {
-    }
-}
-
-pub fn main()
-{
+pub fn main() {
+    let _foo = {x:5};
 }
